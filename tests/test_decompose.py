@@ -15,23 +15,32 @@ class ToSerialize():
     def __init__(self, ID):
     	self.id = ID+1000
 
-blocks = []
-def blockCreated(b):
-	print "Block Created!"
-	blocks.append(b)
+class myBlock(IBlock):
+    def __init__(self):
+        self.id = "Derived"
 
-def msgReceived(m):
+
+blocks = {}
+def createBlock(gid):
+    print "Block Created!"
+    b = myBlock()
+    blocks[gid] = b
+    return b
+
+def msgReceived(m,gid):
 	dd = np.array(m, copy = False)
 	print pickle.loads(binascii.rledecode_hqx(dd)).id
 
 
-myDIY = PyDIY2(blockCreated,msgReceived)
-myDIY.decompose(2, [0,0], [20,20], ghosts=[4,4] )
-print "Neighbor# : " + str(blocks[0].getNeighborNum())
+myDIY = PyDIY2(createBlock)
+myDIY.decompose(2, [0,0], [20,20], ghosts=[2,2] )
+print "Neighbor# : " + str(blocks.values()[0].getNeighborNum())
+print "BoundsMin : " + str(blocks.values()[0].getBoundsMin())
+print "BoundsMax : " + str(blocks.values()[0].getBoundsMax())
 
 msgStr = binascii.rlecode_hqx(pickle.dumps(ToSerialize(rank), 2))
 myDIY.sendToNeighbors(DIY_MSG(msgStr))
-myDIY.recvFromNeighbors()
+myDIY.recvFromNeighbors(msgReceived)
 
 
 # import ctypes

@@ -62,7 +62,7 @@ SET(PYBIND11_PATH "" CACHE PATH "path where pybind11 is installed")
 IF ("${PYBIND11_PATH}" STREQUAL "")
 	MESSAGE(FATAL_ERROR "PYBIND11_PATH not set: Instructions to download Pybind11 can be found at https://github.com/pybind/pybind11")
 ENDIF()
-SET(PYTHON_EXECUTABLE "/usr/bin/python")
+SET(PYTHON_EXECUTABLE "/usr/bin/python" CACHE PATH "path for the python executable/version")
 INCLUDE_DIRECTORIES(${PYBIND11_PATH}/include)
 ADD_SUBDIRECTORY(${PYBIND11_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/pybind11)
 

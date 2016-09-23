@@ -8,6 +8,7 @@
 #ifndef PYDIY2_H_
 #define PYDIY2_H_
 
+#include <pybind11/pybind11.h>
 #include <diy/mpi.hpp>
 #include <diy/master.hpp>
 #include <diy/decomposition.hpp>
@@ -20,18 +21,27 @@ typedef diy::DiscreteBounds Bounds;
 typedef diy::RegularLink<Bounds> RLink;
 typedef diy::RegularDecomposer<Bounds> Decomposer;
 typedef unsigned char bytes;
+namespace py = pybind11;
 
-struct DIY_MSG
+struct DIY_MSG : py::buffer_info
 {
-	bytes* buff;
-	size_t size;
 	int fromGID;
-	bool toFree;
-
-	DIY_MSG(bytes* b=0, size_t n=0, int gid=-1): buff(b), size(n), fromGID(gid), toFree(false)
+	bool owned;
+	DIY_MSG(const py::buffer_info& info) : py::buffer_info(	info.ptr,
+															info.itemsize,
+															info.format,
+															info.ndim,
+															info.shape,
+															info.strides),
+									fromGID(-1), owned(false)
 	{}
+	DIY_MSG(): py::buffer_info(), fromGID(-1)
+	{}
+	DIY_MSG(const DIY_MSG &) = delete;
+	DIY_MSG& operator=(const DIY_MSG &) = delete;
 	~DIY_MSG()
-	{if(toFree) delete[] buff;}
+	{if(owned) delete[] (bytes*)ptr;}
+	int getFromGID() const {return fromGID;}
 };
 namespace diy
 {
@@ -42,43 +52,67 @@ struct Serialization<DIY_MSG>
 	void save(diy::BinaryBuffer& bb, const DIY_MSG& dm)
 		{
 			diy::save(bb, dm.size);
-			diy::save(bb, dm.buff, dm.size);
+			diy::save(bb, dm.itemsize);
+			diy::save(bb, dm.format);
+			diy::save(bb, dm.ndim);
+			diy::save(bb, dm.shape);
+			diy::save(bb, dm.strides);
+			diy::save(bb, (bytes*)dm.ptr, dm.size*dm.itemsize);
 		}
 	static
 	void load(diy::BinaryBuffer& bb, DIY_MSG& dm)
 		{
 			diy::load(bb, dm.size);
-			dm.buff = new bytes[dm.size];
-			/*dm.toFree = true; //Generates a double free error in python*/
-			diy::load(bb, dm.buff, dm.size);
+			diy::load(bb, dm.itemsize);
+			diy::load(bb, dm.format);
+			diy::load(bb, dm.ndim);
+			diy::load(bb, dm.shape);
+			diy::load(bb, dm.strides);
+			dm.ptr = new bytes[dm.size*dm.itemsize];
+			dm.owned = true;
+			diy::load(bb, (bytes*)dm.ptr, dm.size*dm.itemsize);
 		}
 };
 }
-typedef std::function<void(const DIY_MSG&)> MSGRcvdFunc;
+typedef std::shared_ptr<DIY_MSG> MSGPtr;
+typedef std::function<void(const DIY_MSG*,int)> MSGRcvdFunc;
+typedef std::function<const MSGPtr(int)> MSGSentFunc;
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace pydiy2
 {
-class Block
+
+class IBlock
 {
 private:
 	size_t m_neighborNum;
-
+	Bounds m_bounds;
+	Bounds m_coreBounds;
 public:
-	Block(size_t n=0) : m_neighborNum(n)
+	IBlock(size_t n=0) : m_neighborNum(n)
 	{}
-	virtual ~Block()
+	virtual ~IBlock()
 	{}
 
-	size_t getNeighborNum() const {return m_neighborNum;}
+	void setNeighborNum(size_t n) {m_neighborNum=n;}
+	void setBounds(const Bounds& b, const Bounds& c)
+	{
+		m_bounds = b;
+		m_coreBounds = c;
+	}
+
+	std::vector<int> getBoundsMin()		const {return std::vector<int>(m_bounds.min, m_bounds.min+DIY_MAX_DIM);}
+	std::vector<int> getBoundsMax() 	const {return std::vector<int>(m_bounds.max, m_bounds.max+DIY_MAX_DIM);}
+	std::vector<int> getCoreBoundsMin() const {return std::vector<int>(m_coreBounds.min, m_coreBounds.min+DIY_MAX_DIM);}
+	std::vector<int> getCoreBoundsMax() const {return std::vector<int>(m_coreBounds.max, m_coreBounds.max+DIY_MAX_DIM);}
+	size_t getNeighborNum() 			const {return m_neighborNum;}
+
 	void diy2enqueue(const diy::Master::ProxyWithLink& cp, void* msg)
 	{
-		DIY_MSG msgToSend = *static_cast<DIY_MSG*>(msg);
-
 		diy::Link*    l = cp.link();
 		for (size_t i=0; i<l->size(); ++i)
 			if(cp.gid() != l->target(i).gid)
-				cp.enqueue(l->target(i),msgToSend);
+				cp.enqueue(l->target(i),(*(DIY_MSG*)msg));
 	}
 
 	void diy2dequeue(const diy::Master::ProxyWithLink& cp, void* fptr)
@@ -93,27 +127,64 @@ public:
 				DIY_MSG rcvd;
 				cp.dequeue(in[i], rcvd);
 				rcvd.fromGID = in[i];
-				msgFunc(rcvd);
+				msgFunc(&rcvd, cp.gid());
 			}
 	}
 };
-typedef std::function<void(const Block&)> BlockFunc;
+typedef std::function<IBlock*(int)> BlockFunc;
+
+struct MergeFunctor
+{
+	MSGRcvdFunc rcvFPtr;
+	MSGSentFunc sendFPtr;
+
+	MergeFunctor(MSGRcvdFunc mr, MSGSentFunc ms): rcvFPtr(mr), sendFPtr(ms)
+	{}
+
+	void operator()(void* b_, const diy::ReduceProxy& rp, const diy::RegularMergePartners& partners) const
+	{
+		IBlock*     b        = static_cast<IBlock*>(b_);
+		unsigned   round    = rp.round();               // current round number
+
+		// step 1: dequeue and merge
+		for (int i = 0; i < rp.in_link().size(); ++i)
+		{
+			int nbr_gid = rp.in_link().target(i).gid;
+			if (nbr_gid != rp.gid())
+			{
+				DIY_MSG rcvd;
+				rp.dequeue(nbr_gid, rcvd);
+				rcvd.fromGID = nbr_gid;
+				rcvFPtr(&rcvd, rp.gid());
+			}
+		}
+
+		// step 2: enqueue
+		for (int i = 0; i < rp.out_link().size(); ++i)    // redundant since size should equal to 1
+		{
+			// only send to root of group, but not self
+			if (rp.out_link().target(i).gid != rp.gid())
+			{
+				const MSGPtr rcvd = sendFPtr(rp.gid());
+				rp.enqueue(rp.out_link().target(i), *rcvd);
+			}
+		}
+	}
+};
 
 class PyDIY2
 {
 private:
-	BlockFunc		 		m_blockReceiver;
-	MSGRcvdFunc 			m_msgReceiver;
+	BlockFunc		 		m_blockCreator;
 	diy::mpi::communicator 	m_mpiCommunicator;
 	diy::Master 			m_diyMaster;
 	Decomposer* 			m_decomposer;
 
 public:
-	PyDIY2(BlockFunc c, MSGRcvdFunc mr, MPI_Comm comm = MPI_COMM_WORLD) :	m_blockReceiver(c),
-																			m_msgReceiver(mr),
-																			m_mpiCommunicator(comm),
-																			m_diyMaster(m_mpiCommunicator),
-																			m_decomposer(0)
+	PyDIY2(BlockFunc c, MPI_Comm comm = MPI_COMM_WORLD) :	m_blockCreator(c),
+															m_mpiCommunicator(comm),
+															m_diyMaster(m_mpiCommunicator),
+															m_decomposer(0)
 	{}
 	virtual ~PyDIY2()
 	{if(m_decomposer) delete m_decomposer;}
@@ -126,41 +197,39 @@ public:
 				   const RLink& link)         // neighborhood
 	const
 	{
-		Block*         	b	= new Block(link.size());
+		IBlock*         b	= m_blockCreator(gid);
 		RLink*          l   = new RLink(link);
 		diy::Master*    m   = const_cast<diy::Master*>(&m_diyMaster);
 		int             lid = m->add(gid, b, l); // add block to the master (mandatory)
-		m_blockReceiver(*b);
+
+		b->setBounds(bounds, core);
+		b->setNeighborNum(link.size());
 		// process any additional args here, using them to initialize the block
 	}
 
-	std::vector<int> decompose(int dims,
-								const std::vector<int>& min,
-								const std::vector<int>& max,
-								const std::vector<bool>& share_face=std::vector<bool>(),
-								const std::vector<bool>& wrap=std::vector<bool>(),
-								const std::vector<int>& ghosts=std::vector<int>());
-	void sendToNeighbors(const DIY_MSG* msg)
+	void decompose(	int dims,
+					const std::vector<int>& min,
+					const std::vector<int>& max,
+					const std::vector<bool>& share_face=std::vector<bool>(),
+					const std::vector<bool>& wrap=std::vector<bool>(),
+					const std::vector<int>& ghosts=std::vector<int>());
+	void sendToNeighbors(const MSGPtr msg)
 	{
-		m_diyMaster.foreach(&Block::diy2enqueue, (void*)(msg));
+		m_diyMaster.foreach(&IBlock::diy2enqueue, (void*)(msg.get()));
 	}
 
-	void recvFromNeighbors()
+	void recvFromNeighbors(MSGRcvdFunc msgReceiver)
 	{
 		m_diyMaster.exchange();
-		m_diyMaster.foreach(&Block::diy2dequeue, (void*)(&m_msgReceiver));
+		m_diyMaster.foreach(&IBlock::diy2dequeue, (void*)(&msgReceiver));
 	}
-
-	/*std::string popMessage()
+	void mergeReduce(int k, MSGRcvdFunc mr, MSGSentFunc ms)
 	{
-		std::string msg;
-		if(m_msgQueue.size()>0)
-		{
-			msg = m_msgQueue.back();
-			m_msgQueue.pop_back();
-		}
-		return msg;
-	}*/
+		int procs = m_mpiCommunicator.size();
+		diy::RegularMergePartners  partners(*m_decomposer, k, true);
+		diy::RoundRobinAssigner assigner(procs, procs);
+		diy::reduce(m_diyMaster, assigner, partners, MergeFunctor(mr,ms));
+	}
 };
 
 } /* namespace pydiy2 */
