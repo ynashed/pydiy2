@@ -77,6 +77,7 @@ PYBIND11_PLUGIN(pydiy2)
 												"share_face"_a=std::vector<bool>(),
 												"wrap"_a=std::vector<bool>(),
 												"ghosts"_a=std::vector<int>())
+		.def("gidToCoords", &PyDIY2::gidToCoords)
 		.def("sendToNeighbors", &PyDIY2::sendToNeighbors)
 		.def("recvFromNeighbors", &PyDIY2::recvFromNeighbors)
 		.def("mergeReduce", &PyDIY2::mergeReduce);

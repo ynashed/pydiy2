@@ -58,6 +58,7 @@ struct Serialization<DIY_MSG>
 			diy::save(bb, dm.shape);
 			diy::save(bb, dm.strides);
 			diy::save(bb, (bytes*)dm.ptr, dm.size*dm.itemsize);
+			//printf("Saved (%ld,%ld,%s,%ld,%ld,%ld,%ld,%ld)\n", dm.size, dm.itemsize, dm.format.c_str(), dm.ndim, dm.shape[0], dm.shape[1], dm.strides[0], dm.strides[1]);
 		}
 	static
 	void load(diy::BinaryBuffer& bb, DIY_MSG& dm)
@@ -71,6 +72,7 @@ struct Serialization<DIY_MSG>
 			dm.ptr = new bytes[dm.size*dm.itemsize];
 			dm.owned = true;
 			diy::load(bb, (bytes*)dm.ptr, dm.size*dm.itemsize);
+			//printf("Loaded (%ld,%ld,%s,%ld,%ld,%ld,%ld,%ld)\n", dm.size, dm.itemsize, dm.format.c_str(), dm.ndim, dm.shape[0], dm.shape[1], dm.strides[0], dm.strides[1]);
 		}
 };
 }
@@ -216,6 +218,13 @@ public:
 	void sendToNeighbors(const MSGPtr msg)
 	{
 		m_diyMaster.foreach(&IBlock::diy2enqueue, (void*)(msg.get()));
+	}
+
+	std::vector<int> gidToCoords(int gid) const
+	{
+		std::vector<int> pos;
+		m_decomposer->gid_to_coords(gid, pos);
+		return pos;
 	}
 
 	void recvFromNeighbors(MSGRcvdFunc msgReceiver)
