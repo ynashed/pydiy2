@@ -41,8 +41,10 @@ struct DIY_MSG : py::buffer_info
 	DIY_MSG& operator=(const DIY_MSG &) = delete;
 	~DIY_MSG()
 	{if(owned) delete[] (bytes*)ptr;}
+
 	int getFromGID() const {return fromGID;}
 };
+
 namespace diy
 {
 template<>
@@ -77,7 +79,7 @@ struct Serialization<DIY_MSG>
 };
 }
 typedef std::shared_ptr<DIY_MSG> MSGPtr;
-typedef std::function<void(const DIY_MSG*,int)> MSGRcvdFunc;
+typedef std::function<void(MSGPtr,int)> MSGRcvdFunc;
 typedef std::function<const MSGPtr(int)> MSGSentFunc;
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -126,10 +128,10 @@ public:
 		for (size_t i=0; i<in.size(); ++i)
 			if(cp.gid() != in[i])
 			{
-				DIY_MSG rcvd;
-				cp.dequeue(in[i], rcvd);
-				rcvd.fromGID = in[i];
-				msgFunc(&rcvd, cp.gid());
+				DIY_MSG* rcvd = new DIY_MSG;
+				cp.dequeue(in[i], *rcvd);
+				rcvd->fromGID = in[i];
+				msgFunc(MSGPtr(rcvd), cp.gid());
 			}
 	}
 };
@@ -154,10 +156,10 @@ struct MergeFunctor
 			int nbr_gid = rp.in_link().target(i).gid;
 			if (nbr_gid != rp.gid())
 			{
-				DIY_MSG rcvd;
-				rp.dequeue(nbr_gid, rcvd);
-				rcvd.fromGID = nbr_gid;
-				rcvFPtr(&rcvd, rp.gid());
+				DIY_MSG* rcvd = new DIY_MSG;
+				rp.dequeue(nbr_gid, *rcvd);
+				rcvd->fromGID = nbr_gid;
+				rcvFPtr(MSGPtr(rcvd), rp.gid());
 			}
 		}
 
