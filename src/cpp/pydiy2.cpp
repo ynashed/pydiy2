@@ -20,7 +20,7 @@ void PyDIY2::decompose(	int dims,
 	int procs = m_mpiCommunicator.size();
 	int rank = m_mpiCommunicator.rank();
 
-	diy::RoundRobinAssigner assigner(procs, procs); //TODO: add actual block configuration parameter
+	m_assigner = new diy::RoundRobinAssigner(procs, procs); //TODO: add actual block configuration parameter and assigner type
 	Bounds domain;
 
 	for(int d=0; d<dims; ++d)
@@ -30,7 +30,7 @@ void PyDIY2::decompose(	int dims,
 	}
 	
 	m_decomposer = new Decomposer(dims, domain, procs, share_face, wrap, ghosts);
-	m_decomposer->decompose(rank, assigner, *this);
+	m_decomposer->decompose(rank, *m_assigner, *this);
 }
 
 
@@ -80,7 +80,9 @@ PYBIND11_PLUGIN(pydiy2)
 		.def("gidToCoords", &PyDIY2::gidToCoords)
 		.def("sendToNeighbors", &PyDIY2::sendToNeighbors)
 		.def("recvFromNeighbors", &PyDIY2::recvFromNeighbors)
-		.def("mergeReduce", &PyDIY2::mergeReduce);
+		.def("mergeReduce", &PyDIY2::mergeReduce)
+		.def("swapReduce", &PyDIY2::swapReduce)
+		.def("a2aReduce", &PyDIY2::a2aReduce);
 
     return m.ptr();
 }

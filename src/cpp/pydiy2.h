@@ -13,6 +13,9 @@
 #include <diy/master.hpp>
 #include <diy/decomposition.hpp>
 #include <diy/serialization.hpp>
+#include <diy/partners/swap.hpp>
+#include <diy/reduce-operations.hpp>
+#include <diy/assigner.hpp>
 #include <functional>
 #include <vector>
 #include <string>
@@ -20,6 +23,8 @@
 typedef diy::DiscreteBounds Bounds;
 typedef diy::RegularLink<Bounds> RLink;
 typedef diy::RegularDecomposer<Bounds> Decomposer;
+typedef diy::RegularPartners Partners;
+
 typedef unsigned char bytes;
 namespace py = pybind11;
 
@@ -137,20 +142,20 @@ public:
 };
 typedef std::function<IBlock*(int)> BlockFunc;
 
-struct MergeFunctor
+struct ReduceFunctor
 {
 	MSGRcvdFunc rcvFPtr;
 	MSGSentFunc sendFPtr;
 
-	MergeFunctor(MSGRcvdFunc mr, MSGSentFunc ms): rcvFPtr(mr), sendFPtr(ms)
+	ReduceFunctor(MSGRcvdFunc mr, MSGSentFunc ms): rcvFPtr(mr), sendFPtr(ms)
 	{}
 
-	void operator()(void* b_, const diy::ReduceProxy& rp, const diy::RegularMergePartners& partners) const
+	void operator()(void* b_, const diy::ReduceProxy& rp, const Partners& partners) const
 	{
-		IBlock*     b        = static_cast<IBlock*>(b_);
-		unsigned   round    = rp.round();               // current round number
+		//IBlock*     b        = static_cast<IBlock*>(b_);
+		//unsigned   round    = rp.round();               // current round number
 
-		// step 1: dequeue and merge
+		// step 1: dequeue and send
 		for (int i = 0; i < rp.in_link().size(); ++i)
 		{
 			int nbr_gid = rp.in_link().target(i).gid;
@@ -163,7 +168,7 @@ struct MergeFunctor
 			}
 		}
 
-		// step 2: enqueue
+		// step 2: enqueue received messages
 		for (int i = 0; i < rp.out_link().size(); ++i)    // redundant since size should equal to 1
 		{
 			// only send to root of group, but not self
@@ -182,16 +187,21 @@ private:
 	BlockFunc		 		m_blockCreator;
 	diy::mpi::communicator 	m_mpiCommunicator;
 	diy::Master 			m_diyMaster;
+	diy::Assigner*			m_assigner;
 	Decomposer* 			m_decomposer;
 
 public:
 	PyDIY2(BlockFunc c, MPI_Comm comm = MPI_COMM_WORLD) :	m_blockCreator(c),
 															m_mpiCommunicator(comm),
 															m_diyMaster(m_mpiCommunicator),
-															m_decomposer(0)
+															m_decomposer(0),
+															m_assigner(0)
 	{}
 	virtual ~PyDIY2()
-	{if(m_decomposer) delete m_decomposer;}
+	{
+		if(m_decomposer) 	delete m_decomposer;
+		if(m_assigner) 		delete m_assigner;
+	}
 
 
 	void  operator()(int gid,                 // block global id
@@ -217,10 +227,6 @@ public:
 					const std::vector<bool>& share_face=std::vector<bool>(),
 					const std::vector<bool>& wrap=std::vector<bool>(),
 					const std::vector<int>& ghosts=std::vector<int>());
-	void sendToNeighbors(const MSGPtr msg)
-	{
-		m_diyMaster.foreach(&IBlock::diy2enqueue, (void*)(msg.get()));
-	}
 
 	std::vector<int> gidToCoords(int gid) const
 	{
@@ -228,7 +234,10 @@ public:
 		m_decomposer->gid_to_coords(gid, pos);
 		return pos;
 	}
-
+	void sendToNeighbors(const MSGPtr msg)
+	{
+		m_diyMaster.foreach(&IBlock::diy2enqueue, (void*)(msg.get()));
+	}
 	void recvFromNeighbors(MSGRcvdFunc msgReceiver)
 	{
 		m_diyMaster.exchange();
@@ -236,10 +245,13 @@ public:
 	}
 	void mergeReduce(int k, MSGRcvdFunc mr, MSGSentFunc ms)
 	{
-		int procs = m_mpiCommunicator.size();
 		diy::RegularMergePartners  partners(*m_decomposer, k, true);
-		diy::RoundRobinAssigner assigner(procs, procs);
-		diy::reduce(m_diyMaster, assigner, partners, MergeFunctor(mr,ms));
+		diy::reduce(m_diyMaster, *m_assigner, partners, ReduceFunctor(mr,ms));
+	}
+	void swapReduce(int k, MSGRcvdFunc mr, MSGSentFunc ms)
+	{
+		diy::RegularSwapPartners  partners(*m_decomposer, k, true);
+		diy::reduce(m_diyMaster, *m_assigner, partners, ReduceFunctor(mr,ms));
 	}
 };
 
