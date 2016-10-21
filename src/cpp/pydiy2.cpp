@@ -81,8 +81,7 @@ PYBIND11_PLUGIN(pydiy2)
 		.def("sendToNeighbors", &PyDIY2::sendToNeighbors)
 		.def("recvFromNeighbors", &PyDIY2::recvFromNeighbors)
 		.def("mergeReduce", &PyDIY2::mergeReduce)
-		.def("swapReduce", &PyDIY2::swapReduce)
-		.def("a2aReduce", &PyDIY2::a2aReduce);
+		.def("swapReduce", &PyDIY2::swapReduce);
 
     return m.ptr();
 }
